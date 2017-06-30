@@ -32,32 +32,42 @@ class PaypalController extends Controller
     {
         $apiContext = new ApiContext(
             new OAuthTokenCredential(
-                'AV1hLFkUv-3ozBb7_JW3xHP04RYT8JLQasJzAPugkiooOdFF3QPpJy67a1afHlw8KiWsAo-EBUS0T0qT',
-                'EKhQUXAcv1iXlyOEZJbBn1EjHcBV1yNlHwvXx9CXDi8IqJZhEWgaH_WdY1V3Fvv8VkGir5qBNplf4_ZF'
+                env('CLIENT_ID'),
+                env('CLIENT_SECRET')
             )
         );
+
         $apiContext->setConfig([
-            'mode' => 'sandbox',
-            'http.ConnectionTimeOut' => 30,
-            'log.LogEnabled' => false,
-            'log.FileName' => '',
-            'log.logLevel' => 'FINE',
-            'validation.level' => 'log'
+
+            'mode' => env('mode'),
+            'http.ConnectionTimeOut' => env('CONNECTION_TIMEOUT'),
+            'log.LogEnabled' => env('LOG_ENABLED'),
+            'log.FileName' => env('LOG_FILE_NAME'),
+            'log.LogLevel' => env('LOG_LEVEL'),
+            'validation.level' => env('VALIDATION_LEVEL')
+
         ]);
+
         return $apiContext;
     }
 
-
+    /**
+     * Autheticate user
+     *
+     * @param null $reservationAmount
+     * @param $promiser_id
+     * @param $promise_id
+     * @param $supporter_id
+     * @return \Illuminate\Http\RedirectResponse|\Illuminate\Routing\Redirector
+     */
     public function auth($reservationAmount = null, $promiser_id, $promise_id, $supporter_id)
     {
 
-
+        //Set data to session
         request()->session()->push('info', [
-
             'promiser_id' => $promiser_id,
             'promise_id' => $promise_id,
             'supporter_id' => $supporter_id
-
         ]);
 
         // Create new payer and method
@@ -89,9 +99,9 @@ class PaypalController extends Controller
         // Create payment with valid API context
         try {
             $payment->create($this->apiConfig());
-            // Get paypal redirect URL and redirect user
+            // Get paypal redirect URL
             $approvalUrl = $payment->getApprovalLink();
-            // REDIRECT USER TO $approvalUrl
+
         } catch (PayPalConnectionException $ex) {
             echo $ex->getCode();
             echo $ex->getData();
@@ -100,24 +110,33 @@ class PaypalController extends Controller
             die($ex);
         }
 
+        //Redirect user to approval url
         return redirect($approvalUrl);
     }
 
+    /**
+     * Complete authentication
+     *
+     * @param $success
+     * @return Payment
+     */
     public function completeAuth($success)
     {
 
         if ($success == 'true') {
 
+            //Get data from session
             $dataFromSession = request()->session()->pull('info');
-
 
             //Get payment object by passing paymentId
             $paymentId = Input::get('paymentId');
             $payment = Payment::get($paymentId, $this->apiConfig());
+
             // Execute payment with payer id
             $payerId = Input::get('PayerID');
             $execution = new PaymentExecution();
             $execution->setPayerId($payerId);
+
             try {
                 // Execute payment
                 $result = $payment->execute($execution, $this->apiConfig());
@@ -127,6 +146,7 @@ class PaypalController extends Controller
                 $amount = $payment->transactions[0]->amount->total;
                 //Extract payer email
                 $email = $payment->payer->payer_info->email;
+
                 if ($result) {
                     //Store data to DB
                     Transactions::create([
@@ -157,50 +177,65 @@ class PaypalController extends Controller
         }
     }
 
-
+    /**
+     * Reauthorize authorized payments
+     */
     public function reauthorize()
     {
-
+        //Get data from database where status is authorized
         $transactions = Transactions::where('status', 'authorized')->get()->toArray();
 
+        //Loops through all transactions
         foreach ($transactions as $transaction) {
 
-            try {
+            if($transaction['promise_status'] == 'in-progress') {
 
-                $authorization = Authorization::get($transaction['auth_id'], $this->apiConfig());
+                try {
+                    //Get authorization
+                    $authorization = Authorization::get($transaction['auth_id'], $this->apiConfig());
 
-                $amount = new Amount();
-                $amount->setCurrency("USD");
-                $amount->setTotal($transaction['amount']);
+                    //initialize Amount object and set details
+                    $amount = new Amount();
+                    $amount->setCurrency("USD");
+                    $amount->setTotal($transaction['amount']);
 
-                $authorization->setAmount($amount);
-                $authorization->reauthorize($this->apiConfig());
+                    //Reauthorize
+                    $authorization->setAmount($amount);
+                    $authorization->reauthorize($this->apiConfig());
 
-            } catch (PayPalConnectionException $ex) {
-                echo $ex->getCode(); // Prints the Error Code
-                echo $ex->getData(); // Prints the detailed error message
-                die($ex);
-            } catch (Exception $ex) {
-                die($ex);
+                } catch (PayPalConnectionException $ex) {
+                    echo $ex->getCode(); // Prints the Error Code
+                    echo $ex->getData(); // Prints the detailed error message
+                    die($ex);
+                } catch (Exception $ex) {
+                    die($ex);
+                }
+
             }
 
-        }
+            }
+
+
 
     }
 
 
-
+    /**
+     * Gets money from users
+     */
     public function getMoney()
     {
-        //get data from DB
+        //get data from DB where status is authorized
         $transactions =  Transactions::where('status', 'authorized')->get()->toArray();
+
+        //Loops thtough all transactions
         foreach ($transactions as $transaction) {
 
 
-            //Jeigu promise'as failina, tai nuima pinigus tik is promiserio
-            if($transaction['promiser_id'] == $transaction['supporter_id'] && $transaction['promise_status'] == 'promise-failed') {
+            //If promise fails, gets money only from promiser
+            if($transaction['promiser_id'] == $transaction['supporter_id'] && $transaction['promise_status'] == 'promise-canceled') {
 
-
+                //Get authorization
                 $authorization = Authorization::get($transaction['auth_id'], $this->apiConfig());
 
                 try {
@@ -208,12 +243,16 @@ class PaypalController extends Controller
                     $amt = new Amount();
                     $amt->setCurrency("USD")
                         ->setTotal($transaction['amount']);
-                    // Capture authorization
 
+                    // Capture authorization
                     $capture = new Capture();
                     $capture->setAmount($amt);
                     $getCapture = $authorization->capture($capture, $this->apiConfig());
+
+                    //Get single record
                     $singleTransaction = Transactions::find($transaction['id']);
+
+                    //Changes status depending on capture state
                     if($getCapture) {
                         if($getCapture->getState() == 'completed') {
                             $singleTransaction->update([
@@ -231,10 +270,10 @@ class PaypalController extends Controller
 
 
 
-            //Jeigu promise'as ivykdomas, tada nuimami pinigai is visu supporteriu
+            //If promise successful gets money from all supporters
             } elseif($transaction['promiser_id'] != $transaction['supporter_id'] && $transaction['promise_status'] == 'promise-successful') {
 
-
+                //Get authorization
                 $authorization = Authorization::get($transaction['auth_id'], $this->apiConfig());
 
                 try {
@@ -242,24 +281,25 @@ class PaypalController extends Controller
                     $amt = new Amount();
                     $amt->setCurrency("USD")
                         ->setTotal($transaction['amount']);
-                    // Capture authorization
 
+                    // Capture authorization
                     $capture = new Capture();
                     $capture->setAmount($amt);
                     $getCapture = $authorization->capture($capture, $this->apiConfig());
+
+                    //Get single record
                     $singleTransaction = Transactions::find($transaction['id']);
 
 
-
+                    //Changes status depending on capture state
                     if($getCapture) {
-
-
                         if($getCapture->getState() == 'completed') {
                             $singleTransaction->update([
                                 'status' => 'captured-from-supporter'
                             ]);
                         }
                     }
+
                 } catch (PayPalConnectionException $ex) {
                     echo $ex->getCode();
                     echo $ex->getData();
@@ -274,52 +314,58 @@ class PaypalController extends Controller
 
     }
 
-
+    /**
+     * Push money to user accounts
+     */
     public function pushMoney()
     {
+        //Gets all transactions from database
+        $transactions = Transactions::where('promise_status', 'promise-successful')
+                                    ->where('status', 'authorized')
+                                    ->with('supporters')
+                                    ->get()
+                                    ->toArray();
 
-        $transactions = Transactions::get()->toArray();
-
-
+        //Loops through all transactions
         foreach ($transactions as $transaction) {
 
+            //Amount to get from supporters
+            $amountFromSupporters = 0;
 
-            if($transaction['promiser_id'] == $transaction['supporter_id'] && $transaction['promise_status'] == 'promise-successful') {
-
-
-                $promiserEmail = $transaction['email'];
-                $promiserId = $transaction['promiser_id'];
-
+            foreach ($transaction['supporters'] as $supporter) {
+                $amountFromSupporters += $supporter['amount'];
             }
 
-            if($transaction['promiser_id'] == $promiserId && $transaction['status'] == 'captured-from-supporter') {
+            //Initialize new Payout object and set details
+            $payouts = new Payout();
+            $senderBatchHeader = new PayoutSenderBatchHeader();
+            $senderBatchHeader->setSenderBatchId(uniqid())
+                ->setEmailSubject("You have a Payout!");
+            $senderItem = new PayoutItem();
+            $senderItem->setRecipientType('Email')
+                ->setNote('Thanks!')
+                ->setReceiver($transaction['email'])
+                ->setAmount(new Currency('{"value":"' . $amountFromSupporters . '","currency":"USD"}'));
+            $payouts->setSenderBatchHeader($senderBatchHeader)
+                ->addItem($senderItem);
 
-                $payouts = new Payout();
-                $senderBatchHeader = new PayoutSenderBatchHeader();
-                $senderBatchHeader->setSenderBatchId(uniqid())
-                    ->setEmailSubject("You have a Payout!");
-                $senderItem = new PayoutItem();
-                $senderItem->setRecipientType('Email')
-                    ->setNote('Thanks!')
-                    ->setReceiver($promiserEmail)
-//            ->setSenderItemId("2014031400023")
-                    ->setAmount(new Currency('{"value":"' . $transaction['amount'] . '","currency":"USD"}'));
-                $payouts->setSenderBatchHeader($senderBatchHeader)
-                    ->addItem($senderItem);
-                $payouts->createSynchronous($this->apiConfig());
+            //Create new payout
+            $payouts->createSynchronous($this->apiConfig());
 
-
-            }
-
+            //Update transaction status
             Transactions::find($transaction['id'])->update(['status' => 'completed']);
-
         }
 
     }
 
-
+    /**
+     * Sets promise status to promise-successful
+     *
+     * @param $id
+     */
     public function promiseSuccessful($id)
     {
+        //Get transactions from Database
         $transactions = Transactions::where('promise_id', $id)->get();
 
         foreach ($transactions as $transaction) {
@@ -330,8 +376,14 @@ class PaypalController extends Controller
 
     }
 
+    /**
+     * Sets promise status to promise-successful
+     *
+     * @param $id
+     */
     public function promiseCanceled($id)
     {
+        //Get transactions from Database
         $transactions = Transactions::where('promise_id', $id)->get();
 
         foreach ($transactions as $transaction) {
