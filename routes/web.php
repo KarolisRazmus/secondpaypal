@@ -15,7 +15,7 @@ Route::get('/', function () {
     return view('welcome');
 });
 
-Route::get('/paypal-auth/{reservationAmount?}', ['uses' => 'PaypalController@auth', 'as' => 'paypal-auth']);
+Route::get('/paypal-auth', ['uses' => 'PaypalController@auth', 'as' => 'paypal-auth']);
 Route::get('/paypal-auth-complete{success?}', ['uses' => 'PaypalController@completeAuth', 'as' => 'paypal-auth-complete']);
 Route::get('/get-money', ['uses' => 'PaypalController@getMoney', 'as' => 'get-money']);
 Route::get('/push-money', ['uses' => 'PaypalController@pushMoney', 'as' => 'push-money']);
